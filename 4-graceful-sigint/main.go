@@ -13,10 +13,22 @@
 
 package main
 
+import (
+	"context"
+	"os/signal"
+	"syscall"
+)
+
 func main() {
 	// Create a process
 	proc := MockProcess{}
 
-	// Run the process (blocking)
-	proc.Run()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
+	defer cancel()
+
+	go proc.Run()
+	<-ctx.Done()
+	cancel()
+
+	proc.Stop()
 }
