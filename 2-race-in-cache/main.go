@@ -10,6 +10,7 @@ package main
 
 import (
 	"container/list"
+	"sync"
 	"testing"
 )
 
@@ -29,7 +30,12 @@ type page struct {
 
 // KeyStoreCache is a LRU cache for string key-value pairs
 type KeyStoreCache struct {
-	cache map[string]*list.Element
+	cache   map[string]*list.Element
+	cacheMu sync.Mutex
+
+	inflight   map[string]*Broadcaster
+	inflightMu sync.RWMutex
+
 	pages list.List
 	load  func(string) string
 }
@@ -37,19 +43,47 @@ type KeyStoreCache struct {
 // New creates a new KeyStoreCache
 func New(load KeyStoreCacheLoader) *KeyStoreCache {
 	return &KeyStoreCache{
-		load:  load.Load,
-		cache: make(map[string]*list.Element),
+		load:     load.Load,
+		cache:    make(map[string]*list.Element),
+		inflight: make(map[string]*Broadcaster),
 	}
 }
 
 // Get gets the key from cache, loads it from the source if needed
 func (k *KeyStoreCache) Get(key string) string {
+	k.cacheMu.Lock()
 	if e, ok := k.cache[key]; ok {
 		k.pages.MoveToFront(e)
+		k.cacheMu.Unlock()
 		return e.Value.(page).Value
 	}
-	// Miss - load from database and save it in cache
-	p := page{key, k.load(key)}
+	k.cacheMu.Unlock()
+
+	k.inflightMu.Lock()
+	if b, ok := k.inflight[key]; ok {
+		k.inflightMu.Unlock()
+		ch := b.Subscribe()
+		val := <-ch
+		b.Unsubscribe(ch)
+		return val
+	}
+
+	b := NewBroadcaster()
+	k.inflight[key] = b
+	k.inflightMu.Unlock()
+
+	val := k.load(key)
+	b.Publish(val)
+
+	k.inflightMu.Lock()
+	delete(k.inflight, key)
+	k.inflightMu.Unlock()
+
+	p := page{key, val}
+
+	k.cacheMu.Lock()
+	defer k.cacheMu.Unlock()
+
 	// if cache is full remove the least used item
 	if len(k.cache) >= CacheSize {
 		end := k.pages.Back()
